@@ -12,6 +12,8 @@ brew "tree"
 brew "wget"
 brew "qpdf"
 
+brew "defaultbrowser"
+
 cask "visual-studio-code"
 cask "zotero"
 cask "iina"
