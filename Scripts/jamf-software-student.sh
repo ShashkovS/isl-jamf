@@ -7,6 +7,9 @@ ADMIN_USER="admin"
 ADMIN_HOME="/Users/${ADMIN_USER}"
 BREW_PREFIX="/opt/homebrew"
 BREW="${BREW_PREFIX}/bin/brew"
+DEFAULT_BROWSER="${BREW_PREFIX}/bin/defaultbrowser"
+CHROME_APP="/Applications/Google Chrome.app"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 PY_VER="3.14"
 REMOTE_BREWFILE_URL="https://raw.githubusercontent.com/shashkovs/isl-jamf/main/Brewfiles/${PROFILE}.Brewfile"
 BREWFILE_DIR="/Library/Application Support/The Island/Jamf/Brewfiles"
@@ -130,6 +133,71 @@ human_user() {
   [[ -n "${shell}" && "${shell}" != "/usr/bin/false" && "${shell}" != "/sbin/nologin" ]]
 }
 
+run_gui_user() {
+  local user="$1" uid home
+  shift
+  uid="$(/usr/bin/id -u "${user}" 2>/dev/null || true)"
+  home="$(/usr/bin/dscl . -read "/Users/${user}" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}' || true)"
+  [[ "${uid}" =~ ^[0-9]+$ && -n "${home}" && -d "${home}" ]] || return 1
+  /bin/launchctl asuser "${uid}" \
+    /usr/bin/sudo -n -u "${user}" -H \
+      /usr/bin/env HOME="${home}" USER="${user}" LOGNAME="${user}" \
+        PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        SUDO_ASKPASS=/usr/bin/false SSH_ASKPASS=/usr/bin/false \
+        "$@"
+}
+
+current_default_browser() {
+  local user="$1" output
+  output="$(run_gui_user "${user}" "${DEFAULT_BROWSER}" 2>>"${LOG_FILE}")" || return 1
+  /usr/bin/printf '%s\n' "${output}" | \
+    /usr/bin/awk '$1 == "*" { print tolower($2); exit }'
+}
+
+configure_chrome_default_browser() {
+  local user current attempt
+
+  if [[ ! -d "${CHROME_APP}" ]]; then
+    log "WARNING: Google Chrome is not installed at ${CHROME_APP}; default browser was not changed"
+    return
+  fi
+  [[ -x "${DEFAULT_BROWSER}" ]] || fail "defaultbrowser is missing after Brewfile reconcile"
+
+  user="$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || true)"
+  if ! human_user "${user}"; then
+    log "WARNING: no personal console user is logged in; Chrome default-browser request was skipped"
+    return
+  fi
+
+  if [[ -x "${LSREGISTER}" ]]; then
+    run_gui_user "${user}" "${LSREGISTER}" -f "${CHROME_APP}" >>"${LOG_FILE}" 2>&1 || true
+  fi
+
+  current="$(current_default_browser "${user}" || true)"
+  log "Current default browser for ${user}: ${current:-unknown}"
+  if [[ "${current}" == "chrome" ]]; then
+    log "Google Chrome is already the default browser for ${user}"
+    return
+  fi
+
+  if ! run_logged "Requesting Google Chrome as default browser for ${user}" \
+      run_gui_user "${user}" "${DEFAULT_BROWSER}" chrome; then
+    log "WARNING: defaultbrowser failed for ${user}; software installation remains successful"
+    return
+  fi
+
+  for (( attempt=1; attempt<=90; attempt++ )); do
+    current="$(current_default_browser "${user}" || true)"
+    if [[ "${current}" == "chrome" ]]; then
+      log "Google Chrome is now the default browser for ${user}"
+      return
+    fi
+    /bin/sleep 1
+  done
+
+  log "WARNING: Chrome was not confirmed as the default browser for ${user}; macOS user confirmation may still be pending"
+}
+
 list_users() {
   local dir user
   for dir in /Users/*; do
@@ -174,6 +242,7 @@ brew "uv"
 brew "sqlite"
 brew "p7zip"
 brew "ripgrep"
+brew "defaultbrowser"
 
 cask "visual-studio-code"
 EOF_BREWFILE
@@ -309,4 +378,5 @@ for user in "${LOCAL_USERS[@]}"; do
 done
 write_student_policy
 lock_homebrew
+configure_chrome_default_browser
 log "SUCCESS: student profile installed"
