@@ -45,7 +45,7 @@ brew "grep"
 cask "visual-studio-code"
 cask "jetbrains-toolbox"
 cask "pycharm"
-cask "ghostty"
+cask "iterm2"
 
 cask "codex"
 cask "claude-code"
