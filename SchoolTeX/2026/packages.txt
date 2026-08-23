@@ -1,0 +1,92 @@
+# Broad package coverage.
+# Some collections are intentionally redundant: they document the contract
+# and protect it against future changes in collection dependencies.
+collection-latexrecommended
+collection-latexextra
+collection-fontsrecommended
+collection-mathscience
+collection-pictures
+collection-langcyrillic
+collection-xetex
+collection-luatex
+
+# Build, diagnostics, conversion and editor integration.
+latexmk
+latexindent
+chktex
+texcount
+texfindpkg
+latexdiff
+dvisvgm
+synctex
+
+# Bibliography without the enormous collection-bibtexextra.
+biber
+biblatex
+csquotes
+gost
+biblatex-gost
+
+# Computer Modern-compatible fonts.
+cm-super
+cmsrb
+cm-unicode
+newcomputermodern
+
+# Required language support.
+babel-english
+babel-russian
+babel-serbian
+babel-serbianc
+hyphen-english
+hyphen-russian
+hyphen-serbian
+polyglossia
+
+# XeLaTeX and LuaLaTeX Unicode font infrastructure.
+fontspec
+unicode-math
+luaotfload
+
+# Core mathematics and frequently used symbol packages.
+amsfonts
+amsmath
+mathtools
+stmaryrd
+rsfs
+yhmath
+siunitx
+nicematrix
+systeme
+
+# TikZ, plots and mathematical diagrams.
+pgf
+pgfplots
+standalone
+tikz-cd
+tikz-3dplot
+tikz-ext
+tikzmark
+tkz-euclide
+tkz-elements
+circuitikz
+forest
+
+# Typography, tables, code and common document structure.
+adjustbox
+booktabs
+caption
+cmap
+enumitem
+geometry
+hyperref
+lastpage
+listings
+listingsutf8
+microtype
+needspace
+ragged2e
+setspace
+tcolorbox
+wrapfig
+xcolor
