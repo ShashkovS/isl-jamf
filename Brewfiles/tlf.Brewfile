@@ -42,6 +42,8 @@ brew "findutils"
 brew "gnu-sed"
 brew "grep"
 
+brew "defaultbrowser"
+
 cask "visual-studio-code"
 cask "jetbrains-toolbox"
 cask "pycharm"
