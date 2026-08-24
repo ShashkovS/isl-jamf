@@ -1123,8 +1123,32 @@ configure_links_and_path() {
   fi
 
   if [[ -L /Library/TeX/texbin ]]; then
-    [[ "$(/bin/readlink /Library/TeX/texbin)" == "${global_target}" ]] ||
-      fail "/Library/TeX/texbin points to an unexpected installation"
+    local existing_target
+    local existing_resolved
+    local desired_resolved
+
+    existing_target="$(/bin/readlink /Library/TeX/texbin)"
+
+    existing_resolved="$(
+      cd /Library/TeX/texbin 2>/dev/null &&
+        /bin/pwd -P
+    )" || true
+
+    desired_resolved="$(
+      cd "${TEXBIN}" 2>/dev/null &&
+        /bin/pwd -P
+    )" || true
+
+    if [[ "${existing_target}" == "${global_target}" ]]; then
+      :
+    elif [[ -n "${existing_resolved}" &&
+            "${existing_resolved}" == "${desired_resolved}" ]]; then
+      log "Migrating /Library/TeX/texbin from ${existing_target} to ${global_target}"
+      /bin/rm -f /Library/TeX/texbin
+      /bin/ln -s "${global_target}" /Library/TeX/texbin
+    else
+      fail "/Library/TeX/texbin points to unexpected target ${existing_target}"
+    fi
   else
     /bin/ln -s \
       "${global_target}" \
