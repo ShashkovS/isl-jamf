@@ -1220,10 +1220,12 @@ merge_vscode_settings() {
   local settings_dir
   local settings_file
   local backup
+  local merge_script
 
   settings_dir="${TEACHER_HOME}/Library/Application Support/Code/User"
   settings_file="${settings_dir}/settings.json"
   backup="${settings_file}.pre-schooltex"
+  merge_script="${TEACHER_WORK_DIR}/merge-vscode-settings.py"
 
   /bin/mkdir -p "${settings_dir}"
 
@@ -1234,9 +1236,7 @@ merge_vscode_settings() {
   [[ ! -L "${settings_file}" ]] ||
     fail "VS Code settings file is a symbolic link"
 
-  if [[ ! -e "${settings_file}" ||
-        ! -s "${settings_file}" ]]; then
-
+  if [[ ! -e "${settings_file}" || ! -s "${settings_file}" ]]; then
     /usr/bin/install \
       -o "${TEACHER_USER}" \
       -g "${TEACHER_GROUP}" \
@@ -1265,23 +1265,14 @@ merge_vscode_settings() {
     return
   fi
 
-  [[ -e "${backup}" ]] ||
-    /bin/cp -p \
-      "${settings_file}" \
+  if [[ ! -e "${backup}" ]]; then
+    /bin/cp -p "${settings_file}" "${backup}"
+    /usr/sbin/chown \
+      "${TEACHER_USER}:${TEACHER_GROUP}" \
       "${backup}"
+  fi
 
-  /usr/sbin/chown \
-    "${TEACHER_USER}:${TEACHER_GROUP}" \
-    "${backup}"
-
-  run_logged \
-    "Merging LaTeX Workshop settings" \
-    run_teacher \
-      /opt/homebrew/bin/python3.14 \
-      - \
-      "${settings_file}" \
-      "${VSCODE_SETTINGS_FILE}" <<'PYTHON' ||
-    fail "Cannot merge VS Code settings"
+  /bin/cat >"${merge_script}" <<'PYTHON'
 import json
 import os
 import sys
@@ -1315,6 +1306,21 @@ finally:
     if os.path.exists(tmp):
         os.unlink(tmp)
 PYTHON
+
+  /usr/sbin/chown \
+    "${TEACHER_USER}:${TEACHER_GROUP}" \
+    "${merge_script}"
+
+  /bin/chmod 0600 "${merge_script}"
+
+  run_logged \
+    "Merging LaTeX Workshop settings" \
+    run_teacher \
+      /opt/homebrew/bin/python3.14 \
+      "${merge_script}" \
+      "${settings_file}" \
+      "${VSCODE_SETTINGS_FILE}" ||
+    fail "Cannot merge VS Code settings"
 
   /usr/sbin/chown \
     "${TEACHER_USER}:${TEACHER_GROUP}" \
@@ -1381,10 +1387,12 @@ verify_installation() {
       2>>"${LOG_FILE}" ||
       true
   )"
-
-  /usr/bin/printf '%s\n' "${latexmk_info}" |
-    /usr/bin/grep -Fq 'installed: Yes' ||
+  
+  if ! /usr/bin/grep -Eq \
+    '^[[:space:]]*installed:[[:space:]]+Yes[[:space:]]*$' \
+    <<<"${latexmk_info}"; then
     fail "latexmk is not registered as installed in tlmgr"
+  fi
 
   log "Verified TeX Live ${TEXLIVE_YEAR}; tlmgr is writable by ${TEACHER_USER} without sudo"
 }
