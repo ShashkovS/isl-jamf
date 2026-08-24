@@ -21,6 +21,7 @@ HOMEBREW_LOCK="/private/var/run/theisland-homebrew.lock"
 SCHOOLTEX_LOCK="/private/var/run/theisland-schooltex.lock"
 
 WORK_DIR=""
+TEACHER_WORK_DIR=""
 RESULT_FILE=""
 TEACHER_USER=""
 TEACHER_HOME=""
@@ -200,6 +201,15 @@ detect_teacher() {
   log "SchoolTeX directory: ${TEXDIR}"
 }
 
+create_teacher_work_dir() {
+  TEACHER_WORK_DIR="$(
+    /usr/bin/mktemp -d /private/var/tmp/theisland-schooltex-teacher.XXXXXX
+  )"
+  /usr/sbin/chown "${TEACHER_USER}:${TEACHER_GROUP}" "${TEACHER_WORK_DIR}"
+  /bin/chmod 0700 "${TEACHER_WORK_DIR}"
+  log "Teacher work directory: ${TEACHER_WORK_DIR}"
+}
+
 check_prerequisites() {
   [[ "$(/usr/bin/uname -m)" == "arm64" ]] || fail "Only Apple Silicon is supported"
   /usr/bin/id "${ADMIN_USER}" >/dev/null 2>&1 || fail "Local account ${ADMIN_USER} does not exist"
@@ -245,7 +255,7 @@ fetch_managed_files() {
 
   validate_brewfile "${remote_brew}" >>"${LOG_FILE}" 2>&1 || fail "teacher-math.Brewfile contains unsupported syntax"
   validate_packages "${remote_packages}" >>"${LOG_FILE}" 2>&1 || fail "SchoolTeX package manifest is invalid or empty"
-  run_teacher /opt/homebrew/bin/python3.14 -m json.tool "${remote_settings}" >/dev/null 2>>"${LOG_FILE}" || fail "VS Code settings are not valid JSON"
+  /opt/homebrew/bin/python3.14 -m json.tool "${remote_settings}" >/dev/null 2>>"${LOG_FILE}" || fail "Downloaded VS Code settings are not valid JSON"
 
   /usr/bin/grep -Fqx 'brew "ghostscript"' "${remote_brew}" || fail "teacher-math.Brewfile must contain ghostscript"
   /usr/bin/grep -Fqx 'cask "visual-studio-code"' "${remote_brew}" || fail "teacher-math.Brewfile must contain Visual Studio Code"
@@ -418,7 +428,7 @@ install_texlive_if_needed() {
   [[ "${expected}" =~ ^[0-9a-fA-F]{128}$ && "${actual}" == "${expected}" ]] || fail "install-tl SHA-512 verification failed"
   log "Verified install-tl SHA-512 ${actual}"
 
-  extract_dir="${WORK_DIR}/installer"
+  extract_dir="${TEACHER_WORK_DIR}/installer"
   /bin/mkdir -p "${extract_dir}"
   /usr/bin/tar -xzf "${archive}" -C "${extract_dir}" >>"${LOG_FILE}" 2>&1 || fail "Cannot extract install-tl"
   installer_path=""
@@ -600,6 +610,7 @@ verify_installation() {
 
 log "START: math-teacher SchoolTeX ${TEXLIVE_YEAR} profile"
 detect_teacher
+create_teacher_work_dir
 check_prerequisites
 fetch_managed_files
 reconcile_homebrew
