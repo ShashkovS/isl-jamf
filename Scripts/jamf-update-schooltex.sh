@@ -207,7 +207,7 @@ verify_installation() {
   marker_matches || fail "SchoolTeX managed marker is missing or invalid"
   [[ -x "${TEXBIN}/tlmgr" ]] || fail "tlmgr is missing"
   verify_texlive_year || fail "tlmgr does not report TeX Live ${TEXLIVE_YEAR}"
-  /usr/bin/sudo -n -u "${TEACHER_USER}" -H /usr/bin/test -w "${TEXDIR}/tlpkg/texlive.tlpdb" || fail "${TEACHER_USER} cannot update TeX Live"
+  /usr/bin/sudo -n -u "${TEACHER_USER}" -H /bin/test -w "${TEXDIR}/tlpkg/texlive.tlpdb" || fail "${TEACHER_USER} cannot update TeX Live"
   [[ -x /Library/TeX/texbin/latexmk ]] || fail "/Library/TeX/texbin is missing or broken; rerun the math-teacher profile"
   latexmk_info="$(run_teacher "${TEXBIN}/tlmgr" info --only-installed latexmk 2>>"${LOG_FILE}" || true)"
   /usr/bin/printf '%s\n' "${latexmk_info}" | /usr/bin/grep -Fq 'installed: Yes' || fail "latexmk is not installed"

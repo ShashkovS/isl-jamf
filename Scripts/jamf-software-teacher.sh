@@ -318,7 +318,7 @@ unlock_for_teacher() {
   /usr/sbin/chown "${TEACHER_USER}:${group}" "${env_file}"
   /bin/chmod 0644 "${env_file}"
   write_user_path "${TEACHER_USER}" 'export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:${PATH}"'
-  /usr/bin/sudo -n -u "${TEACHER_USER}" -H /usr/bin/test -w "${BREW_PREFIX}" || fail "${TEACHER_USER} cannot write to Homebrew"
+  /usr/bin/sudo -n -u "${TEACHER_USER}" -H /bin/test -w "${BREW_PREFIX}" || fail "${TEACHER_USER} cannot write to Homebrew"
   /usr/bin/sudo -n -u "${TEACHER_USER}" -H "${BREW}" --version >/dev/null 2>&1 || fail "${TEACHER_USER} cannot run Homebrew"
   RESTORE_TEACHER_ON_EXIT=0
   log "Homebrew is writable by ${TEACHER_USER}; future casks default to ${home}/Applications"

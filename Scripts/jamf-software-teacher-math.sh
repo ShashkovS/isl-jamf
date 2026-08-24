@@ -291,7 +291,7 @@ restore_homebrew_to_teacher() {
     /bin/chmod 0644 "${SERVICES_COMMAND}"
   fi
   RESTORE_HOMEBREW=0
-  /usr/bin/sudo -n -u "${TEACHER_USER}" -H /usr/bin/test -w "${BREW_PREFIX}" || fail "${TEACHER_USER} cannot write to Homebrew"
+  /usr/bin/sudo -n -u "${TEACHER_USER}" -H /bin/test -w "${BREW_PREFIX}" || fail "${TEACHER_USER} cannot write to Homebrew"
 }
 
 reconcile_homebrew() {
@@ -437,7 +437,7 @@ install_texlive_if_needed() {
   generate_install_profile "${profile}"
   /usr/sbin/chown -R "${TEACHER_USER}:${TEACHER_GROUP}" "${extract_dir}"
   /bin/chmod 0600 "${profile}"
-  run_teacher /usr/bin/test -r "${profile}" || fail "install-tl profile is not readable by ${TEACHER_USER}"
+  run_teacher /bin/test -r "${profile}" || fail "install-tl profile is not readable by ${TEACHER_USER}"
 
   run_logged "Installing TeX Live ${TEXLIVE_YEAR} scheme-small" \
     run_teacher /bin/bash -c '
@@ -584,7 +584,7 @@ verify_installation() {
   local command texroot latexmk_info
   marker_matches || fail "SchoolTeX managed marker is missing or invalid"
   verify_texlive_year || fail "tlmgr does not report TeX Live ${TEXLIVE_YEAR}"
-  /usr/bin/sudo -n -u "${TEACHER_USER}" -H /usr/bin/test -w "${TEXDIR}/tlpkg/texlive.tlpdb" || fail "${TEACHER_USER} cannot update TeX Live"
+  /usr/bin/sudo -n -u "${TEACHER_USER}" -H /bin/test -w "${TEXDIR}/tlpkg/texlive.tlpdb" || fail "${TEACHER_USER} cannot update TeX Live"
 
   for command in tlmgr kpsewhich latexmk pdflatex xelatex lualatex biber texfindpkg; do
     [[ -x "${TEXBIN}/${command}" ]] || fail "Required TeX command is missing: ${command}"
