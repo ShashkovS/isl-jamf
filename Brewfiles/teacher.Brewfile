@@ -22,7 +22,6 @@ brew "pandoc"
 
 cask "iina"
 cask "zotero"
-cask "zoom"
 cask "ghostty"
 
 cask "codex"
