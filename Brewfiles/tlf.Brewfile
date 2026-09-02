@@ -49,7 +49,7 @@ cask "jetbrains-toolbox"
 cask "pycharm"
 cask "iterm2"
 
-cask "codex"
+cask "codex-app"
 cask "claude-code"
 
 
