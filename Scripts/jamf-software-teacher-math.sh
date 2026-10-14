@@ -268,7 +268,7 @@ detect_target_user() {
 
   if human_user "${console}"; then
     TARGET_USER="${console}"
-  elif [[ ${#LOCAL_USERS[@]} -eq 1 ]]; then
+  elif [[ -n "${LOCAL_USERS[0]+x}" && ${#LOCAL_USERS[@]} -eq 1 ]]; then
     TARGET_USER="${LOCAL_USERS[0]}"
   else
     fail "Cannot determine target account; detected: ${LOCAL_USERS[*]:-none}"
@@ -652,7 +652,7 @@ load_packages() {
     PACKAGES+=("${line}")
   done <"${PACKAGES_FILE}"
 
-  [[ ${#PACKAGES[@]} -gt 0 ]] || fail "SchoolTeX package manifest is empty"
+  [[ -n "${PACKAGES[0]+x}" ]] || fail "SchoolTeX package manifest is empty"
   log "Package manifest contains ${#PACKAGES[@]} entries"
 }
 
@@ -660,7 +660,7 @@ repository_has_failed() {
   local repository="$1"
   local failed
 
-  for failed in "${FAILED_TEXLIVE_REPOSITORIES[@]}"; do
+  for failed in "${FAILED_TEXLIVE_REPOSITORIES[@]+"${FAILED_TEXLIVE_REPOSITORIES[@]}"}"; do
     [[ "${repository}" == "${failed}" ]] && return 0
   done
   return 1
@@ -1066,7 +1066,11 @@ find_missing_packages() {
       MISSING_PACKAGES+=("${package}")
   done
 
-  log "Missing manifest packages: ${#MISSING_PACKAGES[@]}"
+  if [[ -n "${MISSING_PACKAGES[0]+x}" ]]; then
+    log "Missing manifest packages: ${#MISSING_PACKAGES[@]}"
+  else
+    log "Missing manifest packages: 0"
+  fi
 }
 
 verify_manifest_packages() {
@@ -1082,7 +1086,7 @@ verify_manifest_packages() {
     /usr/bin/grep -Fqx "${package}" "${installed_file}" || missing+=("${package}")
   done
 
-  [[ ${#missing[@]} -eq 0 ]] ||
+  [[ -z "${missing[0]+x}" ]] ||
     fail "TeX Live manifest remains incomplete: ${missing[*]}"
 }
 
@@ -1129,7 +1133,7 @@ reconcile_packages() {
   tlmgr_network_action "Updating tlmgr infrastructure" update --self
 
   find_missing_packages
-  if [[ ${#MISSING_PACKAGES[@]} -gt 0 ]]; then
+  if [[ -n "${MISSING_PACKAGES[0]+x}" ]]; then
     tlmgr_network_action \
       "Installing ${#MISSING_PACKAGES[@]} missing SchoolTeX manifest packages" \
       install "${MISSING_PACKAGES[@]}"
