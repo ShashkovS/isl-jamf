@@ -660,7 +660,9 @@ repository_has_failed() {
   local repository="$1"
   local failed
 
-  for failed in "${FAILED_TEXLIVE_REPOSITORIES[@]+"${FAILED_TEXLIVE_REPOSITORIES[@]}"}"; do
+  [[ -n "${FAILED_TEXLIVE_REPOSITORIES[0]+x}" ]] || return 1
+
+  for failed in "${FAILED_TEXLIVE_REPOSITORIES[@]}"; do
     [[ "${repository}" == "${failed}" ]] && return 0
   done
   return 1
