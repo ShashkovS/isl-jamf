@@ -61,6 +61,7 @@ HOMEBREW_PREPARED=0
 HOMEBREW_LOCKED=0
 SCHOOLTEX_LOCKED=0
 SERVICES_COMMAND=""
+DEPLOYMENT_COMPLETE=0
 
 LOCAL_USERS=()
 PACKAGES=()
@@ -1518,7 +1519,12 @@ verify_installation() {
 
 cleanup() {
   local rc=$?
-  trap - EXIT
+  trap - EXIT INT TERM HUP
+
+  if [[ ${rc} -eq 0 && ${DEPLOYMENT_COMPLETE} -ne 1 ]]; then
+    rc=1
+    log "ERROR: SchoolTeX stopped before final verification"
+  fi
 
   restore_homebrew_state_best_effort
 
@@ -1547,6 +1553,10 @@ cleanup() {
 }
 
 trap cleanup EXIT
+trap 'log "ERROR: SchoolTeX interrupted by SIGTERM"; exit 143' TERM
+trap 'log "ERROR: SchoolTeX interrupted by SIGINT"; exit 130' INT
+trap 'log "ERROR: SchoolTeX interrupted by SIGHUP"; exit 129' HUP
+/usr/bin/caffeinate -i -w "$$" </dev/null >/dev/null 2>&1 &
 
 log "START: SchoolTeX ${TEXLIVE_YEAR} mathematics profile"
 
@@ -1572,4 +1582,5 @@ verify_installation
 /bin/rm -rf "${SCHOOLTEX_LOCK}"
 SCHOOLTEX_LOCKED=0
 
+DEPLOYMENT_COMPLETE=1
 log "SUCCESS: SchoolTeX ${TEXLIVE_YEAR} mathematics profile installed for ${TARGET_USER}"
