@@ -49,7 +49,8 @@ cask "jetbrains-toolbox"
 cask "pycharm"
 cask "iterm2"
 
-cask "codex-app"
+# Homebrew lists chatgpt as the replacement for the discontinued codex-app.
+cask "chatgpt"
 cask "claude-code"
 
 
