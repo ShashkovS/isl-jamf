@@ -21,18 +21,21 @@ EXAM_STATE_FILE="/var/db/exam_netlock_state"
 
 SKIP_RUNNING_APPS=1
 # Weekly forced update of running apps. Day as in `date +%u`: 1=Mon, 5=Fri, 0=off.
-# Local hours are [start, end); narrow them to avoid closing apps during lessons.
+# Local time as HHMM, both ends included. Keep it outside lessons.
 FORCE_QUIT_WEEKDAY=5
-FORCE_QUIT_START_HOUR=0
-FORCE_QUIT_END_HOUR=24
+FORCE_QUIT_START_TIME=1630
+FORCE_QUIT_END_TIME=2359
 FORCE_QUIT_GRACE_SECONDS=10
 
 EXAM_MARGIN_SECONDS=3600
-JITTER_MAX_SECONDS=900
+JITTER_MAX_SECONDS=180
 MIN_FREE_GB=10
 CLEANUP_PRUNE_DAYS=30
 # Student virtual environments can point at a specific Python keg in the Cellar.
 KEEP_FORMULAE="python@3.14,python-tk@3.14"
+# Pinned to keep /opt/edupy unchanged. Formulae that need newer versions of these
+# are skipped. To thaw: empty this list and run `brew unpin` for each on every Mac.
+FROZEN_FORMULAE=(python@3.14 python-tk@3.14 tcl-tk)
 
 TIMEOUT_UPDATE=1200
 TIMEOUT_UPGRADE=2400
@@ -429,6 +432,9 @@ upgrade_one() {
   if [[ ${rc} -eq 0 ]]; then
     OK=$((OK + 1))
     log "OK: ${kind} ${name}"
+  elif /usr/bin/grep -Fq 'You must `brew unpin' "${output}" "${output}.stderr" 2>/dev/null; then
+    SKIPPED=$((SKIPPED + 1))
+    log "SKIP: ${kind} ${name}: requires a newer frozen formula"
   else
     FAILED=$((FAILED + 1))
     log "WARN: ${kind} ${name}: exit ${rc}; continuing with other packages"
@@ -450,13 +456,14 @@ running_app_processes() {
 }
 
 force_quit_allowed() {
-  local weekday hour
+  local now weekday time
   [[ ${FORCE_QUIT_WEEKDAY} -ne 0 ]] || return 1
-  weekday="$(/bin/date '+%u')"
-  hour="$(/bin/date '+%H')"
-  hour=$((10#${hour}))
+  now="$(/bin/date '+%u%H%M')"
+  weekday="${now:0:1}"
+  time=$((10#${now:1}))
   [[ ${weekday} -eq ${FORCE_QUIT_WEEKDAY} &&
-    ${hour} -ge ${FORCE_QUIT_START_HOUR} && ${hour} -lt ${FORCE_QUIT_END_HOUR} ]]
+    ${time} -ge $((10#${FORCE_QUIT_START_TIME})) &&
+    ${time} -le $((10#${FORCE_QUIT_END_TIME})) ]]
 }
 
 # Returns 0 only when no process of the app is left.
@@ -512,7 +519,7 @@ relaunch_apps() {
       log "WARN: refusing to relaunch ${app}: invalid code signature"
     elif /usr/bin/perl -e "${WATCHDOG}" "${TIMEOUT_QUERY}" \
         /bin/launchctl asuser "${RELAUNCH_UID}" \
-        /usr/bin/sudo -n -u "${RELAUNCH_USER}" -H /usr/bin/open -a "${app}" \
+        /usr/bin/sudo -n -u "${RELAUNCH_USER}" -H /usr/bin/open -g -a "${app}" \
         </dev/null >>"${LOG_FILE}" 2>&1; then
       log "RESTART: launched ${app} for ${RELAUNCH_USER}"
     else
@@ -594,9 +601,9 @@ check_edupy() {
   [[ -f "${shared}/pyvenv.cfg" ]] || return 0
   if [[ ! -L "${shared}" && -x "${shared}/bin/python" ]] &&
       as_admin /usr/bin/perl -e "${WATCHDOG}" "${TIMEOUT_QUERY}" "${shared}/bin/python" -c \
-      'import sys,site,pip; assert sys.version_info[:2] == (3,14); assert sys.prefix == "/opt/edupy"; assert site.ENABLE_USER_SITE; print(sys.version)' \
+      'import sys,site,pip,tkinter,numpy,scipy,pandas,matplotlib,sklearn,xgboost,catboost; assert sys.version_info[:2] == (3,14); assert sys.prefix == "/opt/edupy"; assert site.ENABLE_USER_SITE; print(sys.version)' \
       </dev/null >>"${LOG_FILE}" 2>&1; then
-    log "OK: existing /opt/edupy still runs; its packages and interpreter links were not changed"
+    log "OK: /opt/edupy runs and its native packages import; nothing in it was changed"
   else
     log "WARN: /opt/edupy needs repair by the TLF installer"
     FAILED=$((FAILED + 1))
@@ -626,6 +633,23 @@ random_delay() {
   wait_active
 }
 
+# A pin also stops `brew upgrade` from pulling these in as dependencies, which
+# skipping them in the update loop alone would not.
+freeze_formulae() {
+  local formula output="${WORK_DIR}/pin.log"
+  # Bash 3.2 with `set -u` treats "${empty[@]}" as an unbound variable.
+  [[ ${#FROZEN_FORMULAE[@]} -gt 0 ]] || return 0
+  for formula in "${FROZEN_FORMULAE[@]}"; do
+    [[ -e "${BREW_PREFIX}/opt/${formula}" ]] || continue
+    [[ ! -L "${BREW_PREFIX}/var/homebrew/pinned/${formula}" ]] || continue
+    if ! capture_brew "${TIMEOUT_QUERY}" "${output}" pin "${formula}"; then
+      failure_detail "${output}"
+      fail "Cannot freeze ${formula}; not updating anything"
+    fi
+    log "Frozen: ${formula}"
+  done
+}
+
 prune_homebrew() {
   local output="${WORK_DIR}/prune.log"
   if ! capture_brew "${TIMEOUT_CLEANUP}" "${output}" cleanup "--prune=${CLEANUP_PRUNE_DAYS}"; then
@@ -649,14 +673,15 @@ log "START: Homebrew maintenance v6; latest available versions, no seven-day age
 [[ -d "${ADMIN_HOME}" && -x "${BREW}" && -x "${JQ}" && ! -L "${BREW_PREFIX}" ]] || fail "Homebrew, jq or admin home is missing/invalid"
 [[ -x /usr/bin/perl ]] || fail "/usr/bin/perl is required for command timeouts"
 [[ "$(/usr/bin/stat -f '%Su' "${BREW_PREFIX}")" == "${ADMIN_USER}" ]] || fail "Homebrew is not owned by admin; do not scope this script to teacher-owned installations"
+# Before the delay: a Mac must not fall asleep in the middle of a run.
+/usr/bin/caffeinate -i -w "$$" </dev/null >/dev/null 2>&1 &
+CAFFEINATE_PID=$!
 random_delay
 if exam_is_near; then
   log "SKIP: exam network lock is scheduled now; retry at the next scheduled run"
   exit 0
 fi
 acquire_lock
-/usr/bin/caffeinate -i -w "$$" </dev/null >/dev/null 2>&1 &
-CAFFEINATE_PID=$!
 RESTORE_PERMISSIONS=1
 cd "${ADMIN_HOME}"
 
@@ -666,6 +691,7 @@ if ! capture_brew "${TIMEOUT_UPDATE}" "${WORK_DIR}/update.log" update; then
   fail "brew update failed; not proceeding with stale metadata"
 fi
 
+freeze_formulae
 prune_homebrew
 check_free_space
 
