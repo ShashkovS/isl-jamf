@@ -1,5 +1,6 @@
 #!/bin/bash
 # Jamf School FTC add-on for admin-owned Homebrew on Apple Silicon.
+# Revision 2: review fixes; no exam/calendar checks.
 # Paste this entire script into Jamf; it is self-contained. See FTC.md.
 # No student sudo, shared writable SDK, user-profile execution as root, or
 # changes to /opt/edupy. The existing daily updater maintains the app casks.
@@ -8,6 +9,7 @@ IFS=$'\n\t'
 umask 022
 trap '' PIPE
 
+PROFILE_REVISION="2"
 ADMIN_USER="admin"
 ADMIN_HOME="/Users/admin"
 BREW_PREFIX="/opt/homebrew"
@@ -27,8 +29,6 @@ SDKMANAGER="${BREW_PREFIX}/share/android-commandlinetools/cmdline-tools/latest/b
 SDK_PACKAGES=("platforms;android-30" "build-tools;35.0.0" "platform-tools" "ndk;21.3.6528147")
 LAUNCH_AGENT="/Library/LaunchAgents/cy.theisland.ftc-user-setup.plist"
 LOCK_DIR="/private/var/run/theisland-homebrew.lock"
-EXAM_STATE_FILE="/var/db/exam_netlock_state"
-EXAM_MARGIN_SECONDS=3600
 MIN_FREE_GB=15
 # Installing the Android SDK accepts Google's SDK licences on the school's behalf.
 ACCEPT_ANDROID_LICENSES=1
@@ -153,25 +153,39 @@ publish_root_file() {
   /bin/mv -f "${stage}" "${target}"
 }
 
-# Numeric release comparison, including Temurin build number. No lexicographic sort.
+# Compare the release tuple first, then the build. 21.0.12.1+1 is newer
+# than 21.0.12+9; the build number is not another component of the release.
 version_at_least() {
   /usr/bin/perl -e '
-    my @a = split /[^0-9]+/, $ARGV[0]; my @b = split /[^0-9]+/, $ARGV[1];
-    for my $i (0 .. ((@a > @b ? scalar @a : scalar @b) - 1)) {
-      my $x = $a[$i] // 0; my $y = $b[$i] // 0;
+    sub parse_version {
+      my ($value) = @_;
+      $value =~ /\A([0-9]+(?:\.[0-9]+)*)\+([0-9]+)(?:-[A-Za-z0-9._+-]+)?\z/
+        or exit 2;
+      return ([split /\./, $1], 0 + $2);
+    }
+    my ($a, $abuild) = parse_version($ARGV[0]);
+    my ($b, $bbuild) = parse_version($ARGV[1]);
+    my $n = @$a > @$b ? scalar @$a : scalar @$b;
+    for my $i (0 .. $n - 1) {
+      my $x = $a->[$i] // 0; my $y = $b->[$i] // 0;
       exit 0 if $x > $y; exit 1 if $x < $y;
-    } exit 0;
+    }
+    exit($abuild >= $bbuild ? 0 : 1);
   ' "$1" "$2"
 }
 
-exam_is_near() {
-  local start end now
-  [[ -f "${EXAM_STATE_FILE}" ]] || return 1
-  start="$(/usr/bin/awk -F= '$1=="START_TS" {print $2; exit}' "${EXAM_STATE_FILE}")"
-  end="$(/usr/bin/awk -F= '$1=="END_TS" {print $2; exit}' "${EXAM_STATE_FILE}")"
-  [[ "${start}" =~ ^[0-9]+$ && "${end}" =~ ^[0-9]+$ ]] || return 1
-  now="$(/bin/date '+%s')"
-  [[ ${now} -ge $((start - EXAM_MARGIN_SECONDS)) && ${now} -lt ${end} ]]
+check_free_space() {
+  local path="$1" free
+  free="$(/bin/df -g "${path}" | /usr/bin/awk 'NR==2 {print $4}')"
+  [[ "${free}" =~ ^[0-9]+$ ]] || fail "Cannot read free disk space at ${path}"
+  log "Free disk space at ${path}: ${free} GB"
+  [[ ${free} -ge ${MIN_FREE_GB} ]] || fail "At least ${MIN_FREE_GB} GB free space is required at ${path}"
+}
+
+apk_validation_required() {
+  local old="$1" fingerprint="$2" missing="$3" created="$4"
+  [[ ${VERIFY_APK_BUILD} -eq 1 &&
+     ( "${old}" != "${fingerprint}" || ${missing} -ne 0 || ${created} -ne 0 ) ]]
 }
 
 safe_root_dir() {
@@ -262,10 +276,12 @@ install_apps() {
   for app in "/Applications/IntelliJ IDEA.app" "/Applications/Android Studio.app"; do
     [[ -d "${app}" && ! -L "${app}" ]] || fail "Application missing: ${app}"
     run "Verify signature: ${app}" 120 /usr/bin/codesign --verify --deep --strict "${app}" || fail "Invalid app signature"
-    # Only these two bundles; never /Applications as a whole or Toolbox's user dirs.
+    # Only these two bundles; preserve file contents, symlinks and execute-bit roles.
+    # Never recurse over /Applications as a whole or Toolbox's user directories.
     /usr/bin/find -P "${app}" -xdev ! -type l -exec /bin/chmod -h -N {} +
     /usr/bin/find -P "${app}" -xdev -exec /usr/sbin/chown -h "${ADMIN_USER}:admin" {} +
     /usr/bin/find -P "${app}" -xdev ! -type l -exec /bin/chmod -h u+rwX,go+rX,go-w {} +
+    run "Verify signature after permissions: ${app}" 120 /usr/bin/codesign --verify --deep --strict "${app}" || fail "Invalid app signature after permission changes"
   done
   [[ -x "${SDKMANAGER}" ]] || fail "Homebrew command-line tools do not provide sdkmanager at ${SDKMANAGER}"
   harden_brew_paths
@@ -303,6 +319,9 @@ install_temurin() {
   if [[ -f "${JDK_HOME}/release" ]]; then
     installed="$(/usr/bin/sed -nE 's/^JAVA_RUNTIME_VERSION="([^"]+)"$/\1/p' "${JDK_HOME}/release")"
     /usr/bin/grep -Eq '^IMPLEMENTOR="Eclipse Adoptium"$' "${JDK_HOME}/release" || fail "Unexpected vendor at ${JDK_HOME}"
+  fi
+  if [[ -n "${installed}" ]]; then
+    version_at_least "${installed}" "${installed}" || fail "Unsupported installed Java release: ${installed}"
   fi
   if [[ -n "${installed}" ]] && version_at_least "${installed}" "${wanted}"; then
     log "Temurin ${installed} already meets ${wanted}; no downgrade or reinstall"
@@ -441,9 +460,6 @@ setup_user() {
   /usr/bin/printf '%s\n' "$$" >"${USER_LOCK}/pid"
   WORK_DIR="$(/usr/bin/mktemp -d "${state}/work.XXXXXX")"
   [[ -x "${JDK_HOME}/bin/javac" && -x "${SDKMANAGER}" && -d "${TEMPLATE}/.git" ]] || fail "FTC base installation is incomplete"
-  if [[ -r "${EXAM_STATE_FILE}" ]] && exam_is_near; then
-    log "DEFER: exam network lock is active or imminent"; exit 75
-  fi
   # This is a root-owned file, not a student's shell profile.
   # shellcheck disable=SC1090
   . "${ENV_FILE}"
@@ -451,7 +467,7 @@ setup_user() {
   [[ ! -w "${BREW_PREFIX}" && ! -w "${JDK_HOME}" && ! -w "${TEMPLATE}" ]] || fail "A shared toolchain path is writable by the student"
   [[ ! -w "/Applications/IntelliJ IDEA.app" && ! -w "/Applications/Android Studio.app" ]] || fail "A shared IDE is writable by the student"
   stamp="${state}/verified-profile.sha256"
-  fp="$(/usr/bin/printf '%s\n' "${FTC_COMMIT}" "${SDK_PACKAGES[@]}" "${VERIFY_APK_BUILD}" \
+  fp="$(/usr/bin/printf '%s\n' "${PROFILE_REVISION}" "${FTC_COMMIT}" "${SDK_PACKAGES[@]}" "${VERIFY_APK_BUILD}" \
     "$(/bin/cat "${JDK_HOME}/release")" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
   [[ ! -f "${stamp}" ]] || old="$(/bin/cat "${stamp}")"
 
@@ -488,6 +504,7 @@ setup_user() {
   if /usr/bin/pgrep -u "${EUID}" -x 'java|javac|javadoc' >/dev/null; then
     log "DEFER: close Java/Gradle builds before SDK maintenance"; exit 75
   fi
+  check_free_space "${home}"
   [[ ${ACCEPT_ANDROID_LICENSES} -eq 1 ]] || fail "School approval for Android SDK licences is required"
   [[ ! -L "${sdk}" ]] || fail "Android SDK is a symlink; migrate it deliberately to a user-owned directory"
   /bin/mkdir -p "${sdk}" "${home}/.android" "${home}/.gradle"
@@ -511,7 +528,7 @@ public final class FtcInstallCheck {
 JAVA_END
   run "Compile Java 8 as student" 120 "${JDK_HOME}/bin/javac" --release 8 -d "${WORK_DIR}" "${WORK_DIR}/FtcInstallCheck.java" || fail "Java compilation failed"
   run "Run Java as student" 120 "${JDK_HOME}/bin/java" -cp "${WORK_DIR}" FtcInstallCheck || fail "Java execution failed"
-  if [[ ${VERIFY_APK_BUILD} -eq 1 && "${old}" != "${fp}" ]]; then
+  if apk_validation_required "${old}" "${fp}" "${missing}" "${created}"; then
     # Build a pristine copy, NEVER the student's working tree or a root process.
     stage="${WORK_DIR}/apk-check"
     copy_template "${stage}"
@@ -545,7 +562,7 @@ write_local_config() {
 }
 
 root_main() {
-  local user uid home shell failures=0 rc free services user_count=0
+  local user uid home shell failures=0 rc services user_count=0
   [[ ${EUID} -eq 0 ]] || fail "Run this installer through Jamf as root"
   [[ "$(/usr/bin/uname -s)" == Darwin && "$(/usr/bin/uname -m)" == arm64 ]] || fail "Native Apple Silicon macOS is required"
   [[ -x /usr/bin/perl && -x "${BREW}" && -x "${JQ}" ]] || fail "Run brew_and_xcode.sh and jamf-software-tlf.sh first"
@@ -562,12 +579,10 @@ root_main() {
   WORK_DIR="$(/usr/bin/mktemp -d /private/var/tmp/theisland-ftc.XXXXXX)"
   /bin/chmod 0700 "${WORK_DIR}"
   log "START: FTC add-on; JDK 21.x; SDK ${FTC_TAG} at ${FTC_COMMIT}"
-  if exam_is_near; then log "DEFER: exam network lock is active or imminent"; exit 75; fi
   acquire_root_lock
   /usr/bin/caffeinate -i -w "$$" </dev/null >/dev/null 2>&1 &
   CAFFEINATE_PID=$!
-  free="$(/bin/df -g / | /usr/bin/awk 'NR==2 {print $4}')"
-  [[ "${free}" =~ ^[0-9]+$ && ${free} -ge ${MIN_FREE_GB} ]] || fail "At least ${MIN_FREE_GB} GB free space is required"
+  check_free_space /
   for home in "/Library/Application Support/The Island" "/Library/Application Support/The Island/Jamf" \
       "/Library/Application Support/The Island/Jamf/Brewfiles" "${FTC_ROOT}" /Library/LaunchAgents /Library/Java /Library/Java/JavaVirtualMachines; do
     safe_root_dir "${home}"
