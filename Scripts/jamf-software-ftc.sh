@@ -1,6 +1,6 @@
 #!/bin/bash
 # Jamf School FTC add-on for admin-owned Homebrew on Apple Silicon.
-# Revision 2: review fixes; no exam/calendar checks.
+# Revision 3: no NDK provisioning; APK validation requires an explicit pilot opt-in.
 # Paste this entire script into Jamf; it is self-contained. See FTC.md.
 # No student sudo, shared writable SDK, user-profile execution as root, or
 # changes to /opt/edupy. The existing daily updater maintains the app casks.
@@ -9,7 +9,7 @@ IFS=$'\n\t'
 umask 022
 trap '' PIPE
 
-PROFILE_REVISION="2"
+PROFILE_REVISION="3"
 ADMIN_USER="admin"
 ADMIN_HOME="/Users/admin"
 BREW_PREFIX="/opt/homebrew"
@@ -26,14 +26,15 @@ TEMPLATE="${FTC_ROOT}/FtcRobotController-${FTC_TAG}"
 ENV_FILE="${FTC_ROOT}/environment.sh"
 BREWFILE="/Library/Application Support/The Island/Jamf/Brewfiles/ftc.Brewfile"
 SDKMANAGER="${BREW_PREFIX}/share/android-commandlinetools/cmdline-tools/latest/bin/sdkmanager"
-SDK_PACKAGES=("platforms;android-30" "build-tools;35.0.0" "platform-tools" "ndk;21.3.6528147")
+SDK_PACKAGES=("platforms;android-30" "build-tools;35.0.0" "platform-tools")
 LAUNCH_AGENT="/Library/LaunchAgents/cy.theisland.ftc-user-setup.plist"
 LOCK_DIR="/private/var/run/theisland-homebrew.lock"
 MIN_FREE_GB=15
 # Installing the Android SDK accepts Google's SDK licences on the school's behalf.
 ACCEPT_ANDROID_LICENSES=1
-# A real online + offline APK build, as the student, once per installation profile.
-VERIFY_APK_BUILD=1
+# APK validation is opt-in until a real M4 proves the FTC v12.0 build does not require NDK.
+# The official build.common.gradle declares ndkVersion; Gradle may otherwise download it.
+VERIFY_APK_BUILD=0
 TIMEOUT_BREW=2400
 TIMEOUT_SDK=2400
 TIMEOUT_BUILD=1800
@@ -496,7 +497,7 @@ setup_user() {
     fi
   done
   [[ -f "${sdk}/platforms/android-30/android.jar" && -x "${sdk}/build-tools/35.0.0/aapt" && \
-     -x "${sdk}/platform-tools/adb" && -f "${sdk}/ndk/21.3.6528147/source.properties" ]] || missing=1
+     -x "${sdk}/platform-tools/adb" ]] || missing=1
   if [[ "${refresh}" != "--refresh" && "${old}" == "${fp}" && ${missing} -eq 0 && ${created} -eq 0 ]]; then
     log "READY: already provisioned; no downloads or builds"
     return
@@ -515,7 +516,7 @@ setup_user() {
   run "Install pinned SDK packages and current platform-tools" "${TIMEOUT_SDK}" \
     "${SDKMANAGER}" --sdk_root="${sdk}" --channel=0 "${SDK_PACKAGES[@]}" <"${input}" || fail "SDK component installation failed"
   [[ -f "${sdk}/platforms/android-30/android.jar" && -x "${sdk}/build-tools/35.0.0/aapt" && \
-     -x "${sdk}/platform-tools/adb" && -f "${sdk}/ndk/21.3.6528147/source.properties" ]] || fail "SDK verification failed"
+     -x "${sdk}/platform-tools/adb" ]] || fail "SDK verification failed"
 
   /bin/cat >"${WORK_DIR}/FtcInstallCheck.java" <<'JAVA_END'
 public final class FtcInstallCheck {
@@ -558,6 +559,11 @@ write_local_config() {
   /usr/bin/printf 'sdk.dir=%s\n' "${sdk}" >"${project}/local.properties"
   /bin/mkdir -p "${project}/.gradle"
   /usr/bin/printf 'java.home=%s\n' "${JDK_HOME}" >"${project}/.gradle/config.properties"
+  # FTC upstream declares ndkVersion even though this profile deliberately omits NDK.
+  # Never allow a CLI Gradle build to silently install missing multi-GB SDK components.
+  if ! /usr/bin/grep -Eq '^[[:space:]]*android\.builder\.sdkDownload[[:space:]]*=' "${project}/gradle.properties" 2>/dev/null; then
+    /usr/bin/printf '\nandroid.builder.sdkDownload=false\n' >>"${project}/gradle.properties"
+  fi
   # Terminal builds use JAVA_HOME; Android Studio uses GRADLE_LOCAL_JAVA_HOME.
 }
 
