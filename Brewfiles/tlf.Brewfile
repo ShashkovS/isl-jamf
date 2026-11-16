@@ -53,4 +53,6 @@ cask "iterm2"
 cask "chatgpt"
 cask "claude-code"
 
+cask "grandperspective"
+
 
