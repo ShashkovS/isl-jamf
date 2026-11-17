@@ -1,6 +1,6 @@
 #!/bin/bash
 # Jamf School: update an admin-owned Homebrew installation on student Macs.
-# v6: bounded commands, guaranteed cleanup, failing exit codes, disk cleanup,
+# v7: bounded commands, guaranteed cleanup, failing exit codes, disk cleanup,
 # exam guard and a weekly forced update of running apps.
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -42,11 +42,13 @@ TIMEOUT_UPGRADE=2400
 TIMEOUT_QUERY=120
 TIMEOUT_CLEANUP=900
 TIMEOUT_PERMISSIONS=600
-LOCK_PID_GRACE_SECONDS=300
+LOCK_PID_GRACE_SECONDS=60
 LOCK_MAX_AGE_SECONDS=21600
 
 # Run a command in its own process group with a deadline. Exit 124 on timeout.
 # TERM, then KILL for the whole group, so curl and git children cannot survive.
+# Perl expands the variables in this program.
+# shellcheck disable=SC2016
 WATCHDOG='
 use POSIX ":sys_wait_h";
 my ($limit, @cmd) = @ARGV;
@@ -173,6 +175,8 @@ stop_active_command() {
 capture_brew() {
   local limit="$1" output="$2" rc=0 command_line started
   shift 2
+  # Cleanup still needs the local services command to restore permissions.
+  [[ $1 == command ]] || stop_for_exam
   builtin printf -v command_line ' %q' "$@"
   CURRENT_OPERATION="brew${command_line}"
   ACTIVE_OUTPUT="${output}"
@@ -180,6 +184,7 @@ capture_brew() {
   log "BEGIN: ${CURRENT_OPERATION}"
   log "Command output while running: ${output} and ${output}.stderr"
 
+  # Switch user first so the watchdog owns the process group it must stop.
   "${AS_ADMIN[@]}" /usr/bin/perl -e "${WATCHDOG}" "${limit}" "${BREW}" "$@" \
     </dev/null >"${output}" 2>"${output}.stderr" &
   wait_active || rc=$?
@@ -279,16 +284,17 @@ restore_permissions() {
 
   # Walk physically. Never clear ACLs or change modes through symlinks.
   permission_step "Remove ACLs from real Homebrew paths" \
-    /usr/bin/find -P "${BREW_PREFIX}" -xdev ! -type l \
+    /usr/bin/find -P "${BREW_PREFIX}" -xdev ! -type l -acl \
     -exec /bin/chmod -h -N {} + || bad=1
 
   # -h changes a symlink's owner, never the owner of its target.
   permission_step "Set Homebrew ownership to ${ADMIN_USER}" \
     /usr/bin/find -P "${BREW_PREFIX}" -xdev \
-    -exec /usr/sbin/chown -h "${ADMIN_USER}:admin" {} + || bad=1
+    \( ! -user "${ADMIN_USER}" -o ! -group admin \) -exec /usr/sbin/chown -h "${ADMIN_USER}:admin" {} + || bad=1
 
   permission_step "Remove group/other writes from real Homebrew paths" \
     /usr/bin/find -P "${BREW_PREFIX}" -xdev ! -type l \
+    \( ! -perm -0600 -o -perm +0022 -o \( ! -perm -0100 \( -type d -o -perm +0111 \) \) \) \
     -exec /bin/chmod -h u+rwX,go-w {} + || bad=1
 
   if [[ -n "${services}" ]]; then
@@ -341,6 +347,7 @@ cleanup() {
   trap '' INT TERM HUP
   set +e
   stop_active_command
+  if [[ -n ${RELAUNCH_APPS} ]]; then relaunch_apps; fi
   if [[ ${rc} -ne 0 ]]; then
     log "Interrupted/failed operation: ${CURRENT_OPERATION}"
     if [[ -n "${ACTIVE_OUTPUT}" ]]; then
@@ -357,9 +364,8 @@ cleanup() {
       rc=1
     fi
   fi
-  if [[ ${LOCKED} -eq 1 ]]; then
-    /bin/rm -f "${LOCK_DIR}/pid"
-    /bin/rmdir "${LOCK_DIR}" 2>>"${LOG_FILE}" || true
+  if [[ ${LOCKED} -eq 1 && $(/bin/cat "${LOCK_DIR}/pid" 2>/dev/null) == "$$" ]]; then
+    /bin/rm -f "${LOCK_DIR}/pid" && /bin/rmdir "${LOCK_DIR}" 2>>"${LOG_FILE}" || true
   fi
   if [[ -n "${CAFFEINATE_PID}" ]]; then
     /bin/kill "${CAFFEINATE_PID}" 2>/dev/null || true
@@ -379,41 +385,34 @@ trap 'fail "Received SIGINT during ${CURRENT_OPERATION}"' INT
 trap 'fail "Received SIGTERM during ${CURRENT_OPERATION}"' TERM
 trap 'fail "Received SIGHUP during ${CURRENT_OPERATION}"' HUP
 
-remove_stale_lock() {
-  /bin/rm -f "${LOCK_DIR}/pid"
-  /bin/rmdir "${LOCK_DIR}" || fail "Cannot remove stale lock"
-  /bin/mkdir "${LOCK_DIR}" || fail "Another deployment acquired the lock"
-}
-
 acquire_lock() {
-  local pid="" age
-  if ! /bin/mkdir "${LOCK_DIR}" 2>/dev/null; then
-    [[ -d "${LOCK_DIR}" && ! -L "${LOCK_DIR}" ]] || fail "Unsafe lock directory"
-    [[ "$(/usr/bin/stat -f '%u' "${LOCK_DIR}")" == "0" ]] || fail "Lock is not owned by root"
-    pid="$(/bin/cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
-    age=$(($(/bin/date '+%s') - $(/usr/bin/stat -f '%m' "${LOCK_DIR}")))
-    if [[ "${pid}" =~ ^[0-9]+$ ]]; then
-      if /bin/kill -0 "${pid}" 2>/dev/null; then
-        [[ ${age} -lt ${LOCK_MAX_AGE_SECONDS} ]] ||
-          fail "Lock held by PID ${pid} for ${age}s; the deployment looks hung"
-        log "SKIP: another Homebrew deployment is running (PID ${pid}); retry at the next scheduled run"
-        exit 0
-      fi
-      log "Removing stale lock of dead PID ${pid}"
-      remove_stale_lock
-    elif [[ ${age} -lt ${LOCK_PID_GRACE_SECONDS} ]]; then
-      # A new lock holder writes its PID right after mkdir.
-      log "SKIP: another Homebrew deployment is starting; retry at the next scheduled run"
-      exit 0
-    else
-      log "Removing lock without a valid PID; age ${age}s"
-      remove_stale_lock
-    fi
+  local rc=0
+  if /bin/mkdir -m 700 "${LOCK_DIR}" 2>/dev/null; then
+    LOCKED=1
+    builtin printf '%s\n' "$$" >"${LOCK_DIR}/pid" || fail "Cannot write deployment PID"
+    return 0
   fi
-  LOCKED=1
-  /usr/sbin/chown root:wheel "${LOCK_DIR}"
-  /bin/chmod 0700 "${LOCK_DIR}"
-  /usr/bin/printf '%s\n' "$$" >"${LOCK_DIR}/pid"
+  [[ -d ${LOCK_DIR} && ! -L ${LOCK_DIR} && -O ${LOCK_DIR} ]] || fail "Unsafe lock directory"
+  # Match jamf-update-ai-apps.sh: reclaim the PID file in place under lockf.
+  (
+    cd "${LOCK_DIR}" || exit 1
+    if [[ ! -s pid ]] && (( $(/bin/date +%s) - $(/usr/bin/stat -f %m .) <= LOCK_PID_GRACE_SECONDS )); then exit 75; fi
+    /usr/bin/lockf -k -t 0 pid /bin/bash -s -- "${LOCK_DIR}" "$$" "${LOCK_MAX_AGE_SECONDS}" <<'LOCK'
+[[ . -ef $1 ]] || exit 75
+owner=$(/bin/cat pid) || exit 1
+if [[ $owner =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner" 2>/dev/null; then
+  (( $(/bin/date +%s) - $(/usr/bin/stat -f %m pid) < $3 )) || exit 76
+  exit 75
+fi
+echo "$2" > pid
+LOCK
+  ) || rc=$?
+  case ${rc} in
+    0) LOCKED=1 ;;
+    75) log "SKIP: another deployment owns or is acquiring the lock"; exit 0 ;;
+    76) fail "Deployment lock has a live owner beyond the allowed runtime" ;;
+    *) fail "Cannot recover deployment lock (exit ${rc})" ;;
+  esac
 }
 
 upgrade_one() {
@@ -422,7 +421,7 @@ upgrade_one() {
   if [[ "${kind}" == "formula" ]]; then
     capture_brew "${TIMEOUT_UPGRADE}" "${output}" upgrade --formula --no-ask "${name}" || rc=$?
   else
-    capture_brew "${TIMEOUT_UPGRADE}" "${output}" upgrade --cask --greedy --no-ask --no-quit \
+    capture_brew "${TIMEOUT_UPGRADE}" "${output}" upgrade --cask --greedy-auto-updates --no-ask --no-quit \
       --appdir=/Applications "${name}" || rc=$?
     if /usr/bin/grep -Fq 'does not have App Management' "${output}" "${output}.stderr" 2>/dev/null; then
       APP_MANAGEMENT_STATUS="missing"
@@ -446,12 +445,12 @@ upgrade_one() {
 # this search can never match its own command line.
 running_app_processes() {
   local processes="${WORK_DIR}/processes.txt"
-  /bin/ps -axww -o pid=,uid=,command= >"${processes}" || return 1
+  /bin/ps -axww -o pid=,uid=,comm= >"${processes}" || return 1
   APP_PATH="$1/Contents/" /usr/bin/awk '
     {
       pid = $1; uid = $2; command = $0
       sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+/, "", command)
-      if (index(command, ENVIRON["APP_PATH"]) > 0) print pid "\t" uid
+      if (index(command, ENVIRON["APP_PATH"]) == 1) print pid "\t" uid
     }' "${processes}"
 }
 
@@ -478,15 +477,15 @@ force_quit_app() {
   processes="$(running_app_processes "${app}")" || return 1
   while IFS=$'\t' read -r pid uid; do
     [[ "${pid}" =~ ^[0-9]+$ ]] || continue
-    if [[ -n "${console_uid}" && "${uid}" == "${console_uid}" ]]; then relaunch=1; fi
+    if [[ ${relaunch} -eq 0 && -n "${console_uid}" && "${uid}" == "${console_uid}" ]]; then
+      RELAUNCH_USER="${console}"
+      RELAUNCH_UID="${console_uid}"
+      RELAUNCH_APPS="${RELAUNCH_APPS}${app}"$'\n'
+      relaunch=1
+    fi
     log "QUIT: ${app}: PID ${pid} (UID ${uid})"
     /bin/kill -TERM "${pid}" 2>/dev/null || true
   done <<<"${processes}"
-  if [[ ${relaunch} -eq 1 ]]; then
-    RELAUNCH_APPS="${RELAUNCH_APPS}${app}"$'\n'
-    RELAUNCH_USER="${console}"
-    RELAUNCH_UID="${console_uid}"
-  fi
 
   for ((attempt = 0; attempt < FORCE_QUIT_GRACE_SECONDS; attempt++)); do
     remaining="$(running_app_processes "${app}")" || return 1
@@ -542,7 +541,7 @@ cask_can_update() {
       .casks[0] |
       if .disabled then "disabled by Homebrew"
       elif .pinned then "pinned"
-      elif any(.artifacts[]?; has("pkg") or has("installer"))
+      elif any(.artifacts[]? | objects; has("pkg") or has("installer"))
       then "pkg/custom installer: excluded from unattended upgrades"
       else "ok" end
     end' <"${info}")"; then
@@ -556,8 +555,9 @@ cask_can_update() {
     return 1
   fi
   if [[ ${SKIP_RUNNING_APPS} -eq 1 ]]; then
-    if ! apps="$(json -r '.casks[0].artifacts[]? | select(has("app")) |
-        (.target // ("/Applications/" + (.app[0] | split("/") | last)))' <"${info}")"; then
+    if ! apps="$(json -r '.casks[0].artifacts[]? | objects | select(has("app")) |
+        (.target // (.app[1]? | objects | .target) // (.app[0] | split("/") | last)) |
+        if startswith("/") then . else "/Applications/" + . end' <"${info}")"; then
       log "WARN: cannot read application paths for ${name}; deferring"
       FAILED=$((FAILED + 1))
       return 1
@@ -585,6 +585,12 @@ cask_can_update() {
         fi
         prefetched=1
       fi
+      stop_for_exam
+      if ! force_quit_allowed; then
+        log "SKIP: ${app} is running outside the forced update window"
+        SKIPPED=$((SKIPPED + 1))
+        return 1
+      fi
       if ! force_quit_app "${app}"; then
         log "WARN: cask ${name}: could not stop ${app}"
         FAILED=$((FAILED + 1))
@@ -600,13 +606,13 @@ check_edupy() {
   local shared="/opt/edupy"
   [[ -f "${shared}/pyvenv.cfg" ]] || return 0
   if [[ ! -L "${shared}" && -x "${shared}/bin/python" ]] &&
-      as_admin /usr/bin/perl -e "${WATCHDOG}" "${TIMEOUT_QUERY}" "${shared}/bin/python" -c \
-      'import sys,site,pip,tkinter,numpy,scipy,pandas,matplotlib,sklearn,xgboost,catboost; assert sys.version_info[:2] == (3,14); assert sys.prefix == "/opt/edupy"; assert site.ENABLE_USER_SITE; print(sys.version)' \
+      "${AS_ADMIN[@]}" /usr/bin/perl -e "${WATCHDOG}" "${TIMEOUT_QUERY}" "${shared}/bin/python" -B -c \
+      'import sys,site,ssl,sqlite3,lzma,bz2,zlib,_decimal,ctypes,hashlib,pip,tkinter,numpy,scipy,pandas,matplotlib,sklearn,xgboost,catboost; assert sys.version_info[:2] == (3,14); assert sys.prefix == "/opt/edupy"; assert site.ENABLE_USER_SITE; print(sys.version)' \
       </dev/null >>"${LOG_FILE}" 2>&1; then
-    log "OK: /opt/edupy runs and its native packages import; nothing in it was changed"
+    log "OK: /opt/edupy runs and its native packages import"
   else
     log "WARN: /opt/edupy needs repair by the TLF installer"
-    FAILED=$((FAILED + 1))
+    if [[ ${1:-after} == after ]]; then FAILED=$((FAILED + 1)); fi
   fi
 }
 
@@ -622,6 +628,14 @@ exam_is_near() {
   fi
   now="$(/bin/date '+%s')"
   [[ ${now} -ge $((start_ts - EXAM_MARGIN_SECONDS)) && ${now} -lt ${end_ts} ]]
+}
+
+stop_for_exam() {
+  if exam_is_near; then
+    log "STOP: exam protection window is active; deferring remaining updates"
+    if (( FAILED )); then exit 1; fi
+    exit 0
+  fi
 }
 
 # Spread the fleet: every Mac behind the school NAT gets the same Jamf schedule.
@@ -667,7 +681,7 @@ check_free_space() {
   [[ ${free} -ge ${MIN_FREE_GB} ]] || fail "Only ${free} GB free; ${MIN_FREE_GB} GB required for updates"
 }
 
-log "START: Homebrew maintenance v6; latest available versions, no seven-day age guarantee"
+log "START: Homebrew maintenance v7; latest available versions, no seven-day age guarantee"
 [[ "$(/usr/bin/uname -s)" == "Darwin" && "$(/usr/bin/uname -m)" == "arm64" ]] || fail "Apple Silicon macOS is required"
 /usr/bin/id "${ADMIN_USER}" >/dev/null 2>&1 || fail "Account ${ADMIN_USER} is missing"
 [[ -d "${ADMIN_HOME}" && -x "${BREW}" && -x "${JQ}" && ! -L "${BREW_PREFIX}" ]] || fail "Homebrew, jq or admin home is missing/invalid"
@@ -685,6 +699,8 @@ acquire_lock
 RESTORE_PERMISSIONS=1
 cd "${ADMIN_HOME}"
 
+log "Checking /opt/edupy before updates"
+check_edupy before
 log "Refreshing Homebrew and package definitions"
 if ! capture_brew "${TIMEOUT_UPDATE}" "${WORK_DIR}/update.log" update; then
   failure_detail "${WORK_DIR}/update.log"
@@ -696,7 +712,7 @@ prune_homebrew
 check_free_space
 
 # Take one inventory snapshot; includes dependencies and self-updating casks.
-if ! capture_brew "${TIMEOUT_QUERY}" "${WORK_DIR}/outdated.json" outdated --json=v2 --greedy; then
+if ! capture_brew "${TIMEOUT_QUERY}" "${WORK_DIR}/outdated.json" outdated --json=v2 --greedy-auto-updates; then
   failure_detail "${WORK_DIR}/outdated.json"
   fail "Cannot obtain the outdated-package inventory"
 fi
@@ -712,6 +728,15 @@ for kind in formula cask; do
   while IFS=$'\t' read -r name _ pinned; do
     [[ -z "${name}" ]] && continue
     [[ "${name}" =~ ^[A-Za-z0-9][A-Za-z0-9@+._/-]*$ ]] || fail "Invalid package name in inventory"
+    stop_for_exam
+    if [[ ${kind} == cask ]]; then
+      case ${name##*/} in
+        chatgpt|claude|codex-app)
+          log "SKIP: ${name} is handled by the dedicated GUI updater"
+          SKIPPED=$((SKIPPED + 1))
+          continue ;;
+      esac
+    fi
     if [[ "${pinned}" == "true" ]]; then
       log "SKIP: ${kind} ${name}: pinned"
       SKIPPED=$((SKIPPED + 1))
@@ -726,7 +751,7 @@ for kind in formula cask; do
   done <"${plan}"
 done
 
-check_edupy
+check_edupy after
 CURRENT_OPERATION="final status"
 if [[ ${FAILED} -ne 0 ]]; then
   fail "${FAILED} package operations failed; see WARN and DETAIL above"
